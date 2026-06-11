@@ -1,14 +1,21 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict
+import hashlib
+import json
+import os
 import uuid
 
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import UPLOAD_DIR
+from app.database import init_db, get_connection
 from app.schemas import ChatRequest, AssistantResponse
+from app.services.extract import raw_text_from_file, structure_resume
+from app.agent import memory as mem
+from app.agent.router import run as agent_run
 
 app = FastAPI(title="Resume Assistant API")
 
-# --- CORS Configuration ---
-# This strictly allows your Vite React app to talk to this server
+# ── CORS ───────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -17,71 +24,159 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- In-Memory Store (Phase 1 MVP) ---
-# Maps session_id to filename/parsed text
-session_memory: Dict[str, dict] = {}
 
-# --- Endpoints ---
+# ── Startup ────────────────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    init_db()
 
+
+# ── Health ─────────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health_check():
-    """Simple endpoint to verify the server is running."""
     return {"ok": True, "message": "Backend is alive!"}
 
+
+# ── Upload ─────────────────────────────────────────────────────────────────────
 @app.post("/upload")
 async def upload_resume(file: UploadFile = File(...)):
-    """Receives the PDF/TXT from React and creates a session."""
-    if not file.filename.endswith(('.pdf', '.txt')):
-        raise HTTPException(status_code=400, detail="Invalid file type")
-    
-    # 1. Generate a unique session ID
+    if not file.filename.endswith((".pdf", ".txt")):
+        raise HTTPException(status_code=400, detail="Only .pdf and .txt files are accepted.")
+
+    contents = await file.read()
+    file_hash = hashlib.sha256(contents).hexdigest()
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # ── Duplicate check ────────────────────────────────────────────────────────
+    cur.execute("SELECT id FROM resumes WHERE file_hash = ?", (file_hash,))
+    existing = cur.fetchone()
+
+    if existing:
+        session_id = existing["id"]
+
+        # Reload structured data into memory if not already there
+        if mem.get_session(session_id) is None:
+            cur.execute(
+                "SELECT structured FROM resumes WHERE id = ?", (session_id,)
+            )
+            row = cur.fetchone()
+            if row and row["structured"]:
+                from app.schemas import ResumeData
+                resume_data = ResumeData.model_validate_json(row["structured"])
+                mem.create_session(session_id, resume_data)
+
+        conn.close()
+        print(f"♻  Duplicate resume — reusing session {session_id}")
+        return {"session_id": session_id}
+
+    # ── New resume ─────────────────────────────────────────────────────────────
     session_id = str(uuid.uuid4())
-    
-    # 2. In Phase 1, you would extract text here. For now, we mock it.
-    session_memory[session_id] = {
-        "filename": file.filename,
-        "raw_text": "Mock extracted text would go here."
-    }
-    
-    print(f"✅ Uploaded {file.filename} into session: {session_id}")
-    
-    # 3. Return the exact key the React frontend is expecting
+    file_ext = file.filename.rsplit(".", 1)[-1].lower()
+    file_path = f"{UPLOAD_DIR}/{session_id}.{file_ext}"
+
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    # 1. Extract raw text
+    raw_text = raw_text_from_file(file_path)
+
+    # 2. Structure via LLM
+    resume_data = structure_resume(raw_text)
+    structured_json = resume_data.model_dump_json()
+
+    # 3. Persist to SQLite
+    cur.execute(
+        """
+        INSERT INTO resumes (id, filename, filepath, file_hash, raw_text, structured)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (session_id, file.filename, file_path, file_hash, raw_text, structured_json),
+    )
+    conn.commit()
+    conn.close()
+
+    # 4. Warm the in-memory session
+    mem.create_session(session_id, resume_data)
+
+    print(f"✅  Uploaded {file.filename}  |  session={session_id}  |  chars={len(raw_text)}")
     return {"session_id": session_id}
 
+
+# ── Chat ───────────────────────────────────────────────────────────────────────
 @app.post("/chat", response_model=AssistantResponse)
 async def chat_with_resume(request: ChatRequest):
-    """Receives the query, checks memory, and returns formatted AI response."""
-    
-    if request.session_id not in session_memory:
-        raise HTTPException(status_code=404, detail="Session not found. Please upload again.")
-    
-    print(f"💬 Received query: '{request.query}' using model: '{request.model}'")
-    
-    # --- MOCK ROUTER LOGIC ---
-    # In Phase 2, this is where your Groq LLM and Tool Router will live.
-    # For now, we return valid Pydantic models to test the React UI.
-    
-    query_lower = request.query.lower()
-    
-    if "gpa" in query_lower or "salary" in query_lower:
-        return AssistantResponse(
-            answer="Not mentioned in the resume. I only state what the document supports.",
-            confidence=0.9,
-            source="inference",
-            missing_data=["GPA", "Expected Salary"]
+
+    # Reload session from DB if not in memory (e.g. after server restart)
+    session = mem.get_session(request.session_id)
+    if session is None:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT structured FROM resumes WHERE id = ?", (request.session_id,)
         )
-        
-    if "skill" in query_lower:
-        return AssistantResponse(
-            answer="The candidate has strong experience in Python, React, and FastAPI.",
-            confidence=0.95,
-            source="resume",
-            missing_data=[]
-        )
-        
-    return AssistantResponse(
-        answer=f"I received your question about '{request.query}'. Once you plug in the Groq API, I will analyze the actual PDF!",
-        confidence=0.6,
-        source="inference",
-        missing_data=[]
+        row = cur.fetchone()
+        conn.close()
+
+        if not row or not row["structured"]:
+            raise HTTPException(status_code=404, detail="Session not found.")
+
+        from app.schemas import ResumeData
+        resume_data = ResumeData.model_validate_json(row["structured"])
+        mem.create_session(request.session_id, resume_data)
+        session = mem.get_session(request.session_id)
+
+    # Persist user message to DB
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+        (request.session_id, "user", request.query),
     )
+    conn.commit()
+
+    try:
+        intent, response = agent_run(
+            resume=session.resume_data,
+            query=request.query,
+            history=session.history,
+        )
+
+        # Update in-memory history
+        mem.append_turn(request.session_id, "user", request.query)
+        mem.append_turn(request.session_id, "assistant", response.answer)
+        mem.set_intent(request.session_id, intent)
+
+        # Persist assistant reply to DB
+        cur.execute(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+            (request.session_id, "assistant", response.answer),
+        )
+        conn.commit()
+
+    except Exception as e:
+        print(f"Agent error: {e}")
+        response = AssistantResponse(
+            answer="The AI service is temporarily unavailable. Please try again.",
+            source="resume",
+            missing_data=[],
+        )
+
+    conn.close()
+    return response
+
+
+# ── History ────────────────────────────────────────────────────────────────────
+@app.get("/history/{session_id}")
+async def get_history(session_id: str):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT role, content, created_at FROM messages WHERE session_id = ? ORDER BY id ASC",
+        (session_id,),
+    )
+    messages = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return {"session_id": session_id, "messages": messages}
