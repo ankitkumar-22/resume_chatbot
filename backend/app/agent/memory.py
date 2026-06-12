@@ -22,8 +22,15 @@ class Session:
 _store: dict[str, Session] = {}
 
 
-def create_session(session_id: str, resume_data: ResumeData) -> None:
-    _store[session_id] = Session(resume_data=resume_data)
+def create_session(
+    session_id: str,
+    resume_data: ResumeData,
+    history: list[dict] | None = None,   # ← restored from DB on reload
+) -> None:
+    _store[session_id] = Session(
+        resume_data=resume_data,
+        history=history or [],
+    )
 
 
 def get_session(session_id: str) -> Session | None:

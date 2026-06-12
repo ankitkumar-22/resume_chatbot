@@ -5,77 +5,32 @@ import uuid
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from app.config import UPLOAD_DIR, HISTORY_LIMIT
+from app.config import UPLOAD_DIR
 from app.database import init_db, get_connection
 from app.schemas import ChatRequest, AssistantResponse
 from app.services.extract import raw_text_from_file, structure_resume
 from app.agent import memory as mem
 from app.agent.router import run as agent_run
-from app.webrtc.signaling import router as webrtc_router, close_all
 
 app = FastAPI(title="Resume Assistant API")
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── WebRTC router ──────────────────────────────────────────────────────────────
-app.include_router(webrtc_router)
 
-
-# ── Startup / shutdown ─────────────────────────────────────────────────────────
+# ── Startup ────────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     init_db()
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await close_all()
-
-
-# ── History loader ─────────────────────────────────────────────────────────────
-
-def _load_history_from_db(session_id: str, cur) -> list[dict]:
-    """
-    Fetch the last HISTORY_LIMIT messages for a session and return them in
-    the {"role": ..., "content": ...} format that the LLM expects.
-
-    Assistant rows are stored as AssistantResponse JSON; we extract only the
-    `answer` field so the history is plain text, matching what append_turn writes.
-    """
-    cur.execute(
-        """
-        SELECT role, content
-        FROM   messages
-        WHERE  session_id = ?
-        ORDER  BY id DESC
-        LIMIT  ?
-        """,
-        (session_id, HISTORY_LIMIT),
-    )
-    rows = cur.fetchall()
-    rows = list(reversed(rows))   # back to chronological order
-
-    history: list[dict] = []
-    for row in rows:
-        if row["role"] == "user":
-            history.append({"role": "user", "content": row["content"]})
-        elif row["role"] == "assistant":
-            try:
-                data = json.loads(row["content"])
-                history.append({"role": "assistant", "content": data["answer"]})
-            except Exception:
-                # Fallback for any legacy plain-text rows
-                history.append({"role": "assistant", "content": row["content"]})
-    return history
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -103,7 +58,7 @@ async def upload_resume(file: UploadFile = File(...)):
     if existing:
         session_id = existing["id"]
 
-        # Reload structured data + history into memory if not already there
+        # Reload structured data into memory if not already there
         if mem.get_session(session_id) is None:
             cur.execute(
                 "SELECT structured FROM resumes WHERE id = ?", (session_id,)
@@ -112,9 +67,7 @@ async def upload_resume(file: UploadFile = File(...)):
             if row and row["structured"]:
                 from app.schemas import ResumeData
                 resume_data = ResumeData.model_validate_json(row["structured"])
-                history = _load_history_from_db(session_id, cur)
-                mem.create_session(session_id, resume_data, history)
-                print(f"♻  Reloaded session {session_id} with {len(history)} history turns")
+                mem.create_session(session_id, resume_data)
 
         conn.close()
         print(f"♻  Duplicate resume — reusing session {session_id}")
@@ -128,10 +81,14 @@ async def upload_resume(file: UploadFile = File(...)):
     with open(file_path, "wb") as f:
         f.write(contents)
 
+    # 1. Extract raw text
     raw_text = raw_text_from_file(file_path)
+
+    # 2. Structure via LLM
     resume_data = structure_resume(raw_text)
     structured_json = resume_data.model_dump_json()
 
+    # 3. Persist to SQLite
     cur.execute(
         """
         INSERT INTO resumes (id, filename, filepath, file_hash, raw_text, structured)
@@ -142,7 +99,9 @@ async def upload_resume(file: UploadFile = File(...)):
     conn.commit()
     conn.close()
 
-    mem.create_session(session_id, resume_data)   # fresh session, no history yet
+    # 4. Warm the in-memory session
+    mem.create_session(session_id, resume_data)
+
     print(f"✅  Uploaded {file.filename}  |  session={session_id}  |  chars={len(raw_text)}")
     return {"session_id": session_id}
 
@@ -151,8 +110,7 @@ async def upload_resume(file: UploadFile = File(...)):
 @app.post("/chat", response_model=AssistantResponse)
 async def chat_with_resume(request: ChatRequest):
 
-    # Reload session from DB if not in memory (e.g. after server restart).
-    # This path now also restores conversation history so the LLM has context.
+    # Reload session from DB if not in memory (e.g. after server restart)
     session = mem.get_session(request.session_id)
     if session is None:
         conn = get_connection()
@@ -161,18 +119,14 @@ async def chat_with_resume(request: ChatRequest):
             "SELECT structured FROM resumes WHERE id = ?", (request.session_id,)
         )
         row = cur.fetchone()
+        conn.close()
 
         if not row or not row["structured"]:
-            conn.close()
             raise HTTPException(status_code=404, detail="Session not found.")
 
         from app.schemas import ResumeData
         resume_data = ResumeData.model_validate_json(row["structured"])
-        history = _load_history_from_db(request.session_id, cur)
-        conn.close()
-
-        mem.create_session(request.session_id, resume_data, history)
-        print(f"🔄  Restored session {request.session_id} with {len(history)} history turns")
+        mem.create_session(request.session_id, resume_data)
         session = mem.get_session(request.session_id)
 
     # Persist user message to DB
@@ -191,10 +145,12 @@ async def chat_with_resume(request: ChatRequest):
             history=session.history,
         )
 
+        # Update in-memory history
         mem.append_turn(request.session_id, "user", request.query)
         mem.append_turn(request.session_id, "assistant", response.answer)
         mem.set_intent(request.session_id, intent)
 
+        # Persist full response JSON so history restores faithfully
         cur.execute(
             "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
             (request.session_id, "assistant", response.model_dump_json()),
@@ -229,9 +185,23 @@ async def get_history(session_id: str):
             try:
                 entry["data"] = json.loads(row["content"])
             except Exception:
+                # Fallback for any legacy plain-text rows
                 entry["data"] = {"answer": row["content"], "source": "resume", "missing_data": []}
         else:
             entry["content"] = row["content"]
         messages.append(entry)
     conn.close()
     return {"session_id": session_id, "messages": messages}
+
+
+# ── Static frontend — mounted LAST so API routes take priority ────────────────
+from fastapi.responses import FileResponse
+
+_dist = os.path.join(os.path.dirname(__file__), "..", "dist")
+if os.path.isdir(_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_dist, "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        # Serve index.html for any unknown path (SPA fallback)
+        return FileResponse(os.path.join(_dist, "index.html"))

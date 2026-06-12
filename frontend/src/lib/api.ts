@@ -4,7 +4,6 @@ const API_BASE = "http://localhost:8000";
 
 export interface AssistantResponse {
   answer: string;
-  confidence: number;
   source: "resume" | "inference";
   missing_data: string[];
 }
@@ -18,16 +17,9 @@ export interface Message {
 
 export const api = {
 
-
   async getHistory(sessionId: string) {
-    const response = await fetch(
-      `${API_BASE}/history/${sessionId}`
-    );
-
-    if (!response.ok) {
-      throw new Error("Failed to load history");
-    }
-
+    const response = await fetch(`${API_BASE}/history/${sessionId}`);
+    if (!response.ok) throw new Error("Failed to load history");
     return response.json();
   },
 
@@ -40,35 +32,24 @@ export const api = {
       body: formData,
     });
 
-    if (!response.ok) {
-      throw new Error(`Upload failed: ${response.statusText}`);
-    }
-
+    if (!response.ok) throw new Error(`Upload failed: ${response.statusText}`);
     return response.json();
   },
 
   async chat(
     sessionId: string,
-    query: string,
-    model: string
+    query: string
   ): Promise<AssistantResponse> {
-
     const response = await fetch(`${API_BASE}/chat`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         session_id: sessionId,
         query,
-        model,
       }),
     });
 
-    if (!response.ok) {
-      throw new Error(`Chat failed: ${response.statusText}`);
-    }
-
+    if (!response.ok) throw new Error(`Chat failed: ${response.statusText}`);
     return response.json();
-  }
+  },
 };
