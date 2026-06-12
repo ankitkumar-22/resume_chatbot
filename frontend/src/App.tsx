@@ -14,7 +14,6 @@ const QUICK_PROMPTS = [
 const SESSION_KEY = "resume_session_id";
 const FILENAME_KEY = "resume_filename";
 
-// History -> Message mapper
 function mapHistory(msgs: any[]): Message[] {
   return msgs.map((msg, index) => {
     if (msg.role === "user") {
@@ -24,13 +23,26 @@ function mapHistory(msgs: any[]): Message[] {
   });
 }
 
+// ── Confidence badge ──────────────────────────────────────────────────────────
+// Renders a small pill showing the numeric confidence value.
+// Color shifts: green (≥0.8) → amber (≥0.5) → red (<0.5)
+function ConfidencePill({ value }: { value: number }) {
+  const pct = Math.round(value * 100);
+  const tier = value >= 0.8 ? "high" : value >= 0.5 ? "mid" : "low";
+  return (
+    <span className={`confidence confidence--${tier}`} title={`Confidence: ${pct}%`}>
+      {pct}%
+    </span>
+  );
+}
+
 export default function App() {
 
   const [filename, setFilename] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [isUploading, setIsUploading] = useState(false);   // file upload / replace in progress
-  const [isSending, setIsSending] = useState(false);       // chat message in flight
-  const [isReplacing, setIsReplacing] = useState(false);   // replace triggered on existing session
+  const [isUploading, setIsUploading] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [isReplacing, setIsReplacing] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -44,14 +56,12 @@ export default function App() {
   const isUploaded = !!sessionId;
   const viewState = sessionId !== null ? "chat" : "landing";
 
-  // ── Restore session from localStorage on first load ──────────────────────
+  // ── Restore session ──────────────────────────────────────────────────────
   useEffect(() => {
     const savedSessionId = localStorage.getItem(SESSION_KEY);
     const savedFilename  = localStorage.getItem(FILENAME_KEY);
-
     if (!savedSessionId) return;
 
-    // Set filename immediately so the loading state shows the name
     setFilename(savedFilename);
     setIsUploading(true);
 
@@ -68,7 +78,7 @@ export default function App() {
       .finally(() => setIsUploading(false));
   }, []);
 
-  // ── Auto-scroll chat ─────────────────────────────────────────────────────
+  // ── Auto-scroll ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (threadRef.current) {
       threadRef.current.scrollTop = threadRef.current.scrollHeight;
@@ -91,7 +101,7 @@ export default function App() {
 
     setErrorMsg(null);
     setIsUploading(true);
-    if (isUploaded) setIsReplacing(true);   // already have a session → replace flow
+    if (isUploaded) setIsReplacing(true);
 
     try {
       const res = await api.uploadResume(file);
@@ -139,7 +149,7 @@ export default function App() {
     }
   };
 
-  // ── Start over — clear session and return to landing ────────────────────
+  // ── Start over ───────────────────────────────────────────────────────────
   const handleStartOver = () => {
     localStorage.removeItem(SESSION_KEY);
     localStorage.removeItem(FILENAME_KEY);
@@ -155,7 +165,6 @@ export default function App() {
     if (e.dataTransfer.files?.[0]) handleFileUpload(e.dataTransfer.files[0]);
   };
 
-  // ── Resume chip — normal, replacing, or restoring ────────────────────────
   const renderResumeChip = () => {
     if (isReplacing || (isUploading && isUploaded)) {
       return (
@@ -173,18 +182,10 @@ export default function App() {
           </svg>
         </span>
         <span className="fname">{filename}</span>
-        <button
-          className="replace"
-          disabled={isUploading || isSending}
-          onClick={() => fileInputRef.current?.click()}
-        >
+        <button className="replace" disabled={isUploading || isSending} onClick={() => fileInputRef.current?.click()}>
           Replace
         </button>
-        <button
-          className="replace start-over"
-          disabled={isUploading || isSending}
-          onClick={handleStartOver}
-        >
+        <button className="replace start-over" disabled={isUploading || isSending} onClick={handleStartOver}>
           Start over
         </button>
       </div>
@@ -277,6 +278,7 @@ export default function App() {
                           <span className="dot"></span>
                           {m.data.source === "resume" ? "Resume" : "Inference"}
                         </span>
+                        <ConfidencePill value={m.data.confidence} />
                       </div>
                       {m.data.missing_data && m.data.missing_data.length > 0 && (
                         <div className="missing">

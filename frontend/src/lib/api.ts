@@ -4,6 +4,7 @@ const API_BASE = "http://localhost:8000";
 
 export interface AssistantResponse {
   answer: string;
+  confidence: number;         // 0–1  (deterministic tools → high; LLM inference → capped at 0.7)
   source: "resume" | "inference";
   missing_data: string[];
 }
@@ -36,17 +37,11 @@ export const api = {
     return response.json();
   },
 
-  async chat(
-    sessionId: string,
-    query: string
-  ): Promise<AssistantResponse> {
+  async chat(sessionId: string, query: string): Promise<AssistantResponse> {
     const response = await fetch(`${API_BASE}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session_id: sessionId,
-        query,
-      }),
+      body: JSON.stringify({ session_id: sessionId, query }),
     });
 
     if (!response.ok) throw new Error(`Chat failed: ${response.statusText}`);

@@ -201,6 +201,37 @@ button {
   }
 }
 
+/* Add these rules to your index.css */
+
+/* ── Confidence pill ─────────────────────────────────────────────────────────
+   Sits inline with the source badge inside .meta
+   ────────────────────────────────────────────────────────────────────────── */
+.confidence {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  opacity: 0.85;
+}
+
+.confidence--high {
+  background: rgba(16, 185, 129, 0.15);   /* green tint */
+  color: #10b981;
+}
+
+.confidence--mid {
+  background: rgba(245, 158, 11, 0.15);   /* amber tint */
+  color: #f59e0b;
+}
+
+.confidence--low {
+  background: rgba(239, 68, 68, 0.15);    /* red tint */
+  color: #ef4444;
+}
+
 /* ---------- upload card ---------- */
 .dropzone {
   border: 1.5px dashed var(--border-strong);

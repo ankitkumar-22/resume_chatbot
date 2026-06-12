@@ -96,17 +96,22 @@ Resume data:
 
 Rules:
 - If the answer is clearly present in the resume data, answer factually and
-  end your response with the exact token  [SOURCE:resume]
+  end your response with  [SOURCE:resume]
 - If you are making an inference or evaluation beyond what the data states,
-  end your response with the exact token  [SOURCE:inference]
+  end your response with  [SOURCE:inference]
 - If information is missing, say exactly:
   "This information is not present in the resume." and end with  [SOURCE:resume]
 - Do NOT fabricate details. Do NOT hallucinate.
 - Keep answers concise and factual.
+- After the SOURCE token, add a CONFIDENCE token: [CONFIDENCE:X.X]
+  where X.X is a float between 0.0 and 1.0 reflecting how certain you are.
+  Base it on how directly the resume data supports your answer.
+
+Example ending: [SOURCE:resume] [CONFIDENCE:0.9]
 """
 
 
-# ── Skill-matching prompt (used when router picks skill_matcher) ───────────────
+# ── Skill-matching prompt ──────────────────────────────────────────────────────
 
 def build_skill_match_prompt(resume_skills: dict, target_skills: list[str]) -> str:
     return f"""You are a skill-gap analyser.
