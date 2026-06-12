@@ -1,0 +1,17 @@
+# Python Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# Distribution / Packaging
+*.egg-info/
+dist/
+build/
+
+# IDE Specific (if using PyCharm/VS Code specific to backend)
+*.pyc   
